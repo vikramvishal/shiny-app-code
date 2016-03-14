@@ -1,0 +1,208 @@
+---
+title: "Capstone Project Milestone Report"
+author: "Vikram Vishal"
+date: "March 14, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Exploratory Analysis of Project Training Data
+
+#### Objectives of Milestone Report
+
+The objective of this report is to demonstrate competency in working with the project's training data and explains using exploratory analysis major features identified. It also briefly summarise plans for creating the prediction algorithm and Shiny app for non-data scientist audiences.
+
+#### 1. Setup R Execution Environment
+
+We preload the necessary R libraries and create parallel computing clusters in preparation of an efficient R execution environment for our analysis work.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Preload necessary R librabires
+library(dplyr)
+library(doParallel)
+library(stringi)
+library(tm)
+library(slam)
+library(ggplot2)
+library(wordcloud)
+
+# Setup parallel clusters to accelarate execution time
+jobcluster <- makeCluster(detectCores())
+invisible(clusterEvalQ(jobcluster, library(tm)))
+invisible(clusterEvalQ(jobcluster, library(slam)))
+invisible(clusterEvalQ(jobcluster, library(stringi)))
+invisible(clusterEvalQ(jobcluster, library(wordcloud)))
+```
+
+#### 2. Downloading Data Files
+
+We have chosen to use the project's "US" training data. Therefore, we check if the project's training data Coursera-SwiftKey.zip exists, and download/unzip them if necessary.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Check for zip file and download if necessary
+if (!file.exists("Coursera-SwiftKey.zip")) {
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", 
+        destfile = "Coursera-SwiftKey.zip")
+}
+# Check for data file and unzip if necessary
+if (!file.exists("en_US/en_US.blogs.txt")) {
+    unzip("Coursera-SwiftKey.zip", exdir = "final/en_US", list = TRUE)
+}
+```
+
+#### 3. Loading Raw Data
+
+We load data from the 3 data files in binary format so as to preserve all characters.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Read blogs data in binary mode
+conn <- file("final/en_US/en_US.blogs.txt", open = "rb")
+blogs <- readLines(conn, encoding = "UTF-8")
+close(conn)
+
+# Read news data in binary mode
+conn <- file("final/en_US/en_US.news.txt", open = "rb")
+news <- readLines(conn, encoding = "UTF-8")
+close(conn)
+
+# Read twitter data in binary mode
+conn <- file("final/en_US/en_US.twitter.txt", open = "rb")
+twits <- readLines(conn, encoding = "UTF-8")
+close(conn)
+
+rm(conn)
+```
+
+#### 4. Analyzing Raw Data (Exploratory Analysis - Part 1)
+
+We analyse basic statistics of the 3 data files, including Line, Character and Word counts, and Words Per Line (WPL) summaries. Basic histograms are also plotted to identified distribution of these data.
+
+From the statistics, we observed that WPL for blogs are generally higher (at 41.75 mean), followed by news (at 34.41 mean) and twits (at 12.75 mean). This may be reflective of the expected attention-span of readers of these contents.
+
+From the histograms, we also noticed that the WPL for all data types are right-skewed (i.e. longer right tail). This may be an indication of the general trend towards short and concised communications.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Compute words per line info on each line for each data type
+rawWPL<-lapply(list(blogs,news,twits),function(x) stri_count_words(x))
+
+# Compute statistics and summary info for each data type
+rawstats<-data.frame(
+            File=c("blogs","news","twitter"), 
+            t(rbind(sapply(list(blogs,news,twits),stri_stats_general),
+                    TotalWords=sapply(list(blogs,news,twits),stri_stats_latex)[4,])),
+            # Compute words per line summary
+            WPL=rbind(summary(rawWPL[[1]]),summary(rawWPL[[2]]),summary(rawWPL[[3]]))
+            )
+print(rawstats)
+```
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Plot histogram for each data type
+qplot(rawWPL[[1]],geom="histogram",main="Histogram for US Blogs",
+      xlab="No. of Words",ylab="Frequency",binwidth=10)
+```
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+qplot(rawWPL[[2]],geom="histogram",main="Histogram for US News",
+      xlab="No. of Words",ylab="Frequency",binwidth=10)
+```
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+qplot(rawWPL[[3]],geom="histogram",main="Histogram for US Tweets",
+      xlab="No. of Words",ylab="Frequency",binwidth=1)
+```
+
+```{r, echo=TRUE}
+rm(rawWPL);rm(rawstats)
+```
+
+#### 5. Sampling Raw Data
+
+As the raw data is sizeable, we will sample 30000 lines from each data type before cleaning and performing exploratory analysis on them.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+samplesize <- 30000  # Assign sample size
+set.seed(2703)  # Ensure reproducibility 
+
+# Create raw data and sample vectors
+data <- list(blogs, news, twits)
+sample <- list()
+
+# Iterate each raw data to create 'cleaned'' sample for each
+for (i in 1:length(data)) {
+    # Create sample dataset
+    Filter <- sample(1:length(data[[i]]), samplesize, replace = FALSE)
+    sample[[i]] <- data[[i]][Filter]
+    # Remove unconvention/funny characters
+    for (j in 1:length(sample[[i]])) {
+        row1 <- sample[[i]][j]
+        row2 <- iconv(row1, "latin1", "ASCII", sub = "")
+        sample[[i]][j] <- row2
+    }
+}
+
+rm(blogs)
+rm(news)
+rm(twits)
+```
+
+####6. Creating Corpus and Cleaning Data
+
+We create corpus for each data type before cleaning them (e.g. removing punctuations, white spaces, numbers and stopwords (e.g. profanity), as well as converting text to lowercase. Stemming are also performed to eradicate duplication of similar words (e.g. 'enter','entering'). Lastly, a document term matrix is created to identify terms occurences in documents (or lines).
+
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+# Create corpus and document term matrix vectors
+corpus <- list()
+dtMatrix <- list()
+
+# Iterate each sample data to create corpus and DTM for each
+for (i in 1:length(sample)) {
+    # Create corpus dataset
+    corpus[[i]] <- Corpus(VectorSource(sample[[i]]))
+    # Cleaning/stemming the data
+    corpus[[i]] <- tm_map(corpus[[i]], tolower)
+    corpus[[i]] <- tm_map(corpus[[i]], removeNumbers)
+    corpus[[i]] <- tm_map(corpus[[i]], removeWords, stopwords("english"))
+    corpus[[i]] <- tm_map(corpus[[i]], removePunctuation)
+    corpus[[i]] <- tm_map(corpus[[i]], stemDocument)
+    corpus[[i]] <- tm_map(corpus[[i]], stripWhitespace)
+    corpus[[i]] <- tm_map(corpus[[i]], PlainTextDocument)
+    # calculate document term frequency for corpus
+    dtMatrix[[i]] <- DocumentTermMatrix(corpus[[i]], control = list(wordLengths = c(0, 
+        Inf)))
+}
+
+rm(data)
+rm(sample)
+```
+
+#### 7. Plotting Data in Word Cloud (Exploratory Analysis - Part 2)
+
+We chose to explore the corpus data using word clouds as they can illustrate word frequencies very effectively. The most frequent words are displayed in respect to their size and centralisation. One word cloud is plotted for each data type.
+
+```{r, echo=TRUE,message=FALSE, warning=FALSE}
+set.seed(2803)  # Ensure reproducibility
+par(mfrow = c(1, 3))  # Establish Plotting Panel
+headings = c("US Blogs Word Cloud", "US News Word Cloud", "US Twits Word Cloud")
+
+# Iterate each corpus/DTM and plot word cloud for each
+for (i in 1:length(corpus)) {
+    wordcloud(words = colnames(dtMatrix[[i]]), freq = col_sums(dtMatrix[[i]]), 
+        scale = c(3, 1), max.words = 100, random.order = FALSE, rot.per = 0.35, 
+        use.r.layout = FALSE, colors = brewer.pal(8, "Dark2"))
+    title(headings[i])
+}
+```
+
+#### 8. Plans Ahead for Project
+
+Now that we have performed some exploratory analysis, we are ready to start building the predictive model(s) and eventually the data product. Below are high-level plans to achieve this goal:
+
+- Using N-grams to generate tokens of one to four words.
+- Summarizing frequency of tokens and find association between tokens.
+- Building predictive model(s) using the tokens.
+- Develop data product (i.e. shiny app) to make word recommendation (i.e. prediction) based on user inputs.
